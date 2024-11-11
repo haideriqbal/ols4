@@ -1,79 +1,136 @@
 
 package uk.ac.ebi.ols4.predownloader;
 
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.LinkedHashSet;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class BulkOntologyDownloader {
 
     static final int NUM_THREADS = 16;
 
-    Set<String> urlsToDownload;
-    Set<String> urlsAlreadyProcessed;
+	List<Ontology> ontologiesToDownload;
+	private Set<String> ontologyIdsAlreadyProcessed;
     String downloadPath;
     boolean loadLocalFiles;
+	List<String> updatedOntologyIds;
+	List<String> unchangedOntologyIds;
+	private Map<String, String> previousChecksums;
+	private Map<String, String> updatedChecksums;
 
     Set<OntologyDownloaderThread> threads = new HashSet<>();
 
-    public BulkOntologyDownloader(List<String> ontologyUrls, String downloadPath, boolean loadLocalFiles) {
-        this.urlsToDownload = new LinkedHashSet<String>(ontologyUrls);
-        this.urlsAlreadyProcessed = new HashSet<>();
+    public BulkOntologyDownloader(List<Ontology> ontologies,
+								  String downloadPath,
+								  boolean loadLocalFiles,
+								  Map<String, String> previousChecksums) {
+        this.ontologiesToDownload = new ArrayList<>(ontologies);
+		this.ontologyIdsAlreadyProcessed = Collections.synchronizedSet(new HashSet<>());
         this.downloadPath = downloadPath;
         this.loadLocalFiles = loadLocalFiles;
+		this.previousChecksums = previousChecksums;
+		this.updatedChecksums = new ConcurrentHashMap<>();
+		this.updatedOntologyIds = Collections.synchronizedList(new ArrayList<>());
+		this.unchangedOntologyIds = Collections.synchronizedList(new ArrayList<>());
     }
 
     public void downloadAll() {
 
-	while(urlsToDownload.size() > 0) {
+		while (!ontologiesToDownload.isEmpty()) {
 
 		List<Thread> threads = new ArrayList<>();
-		Set<String> imports = new LinkedHashSet<>();
+		Set<Ontology> imports = new LinkedHashSet<>();
 
 		for(int i = 0; i < NUM_THREADS; ++ i) {
 
-			if(urlsToDownload.size() == 0) {
+			if (ontologiesToDownload.isEmpty()) {
 				break;
 			}
 
-			Iterator<String> it = urlsToDownload.iterator();
-			String nextUrl = it.next();
-			it.remove();
+			Ontology ontology = ontologiesToDownload.remove(0);
 
-			urlsAlreadyProcessed.add(nextUrl);
+			// Check if we've already processed this ontology ID
+			if (ontologyIdsAlreadyProcessed.contains(ontology.getId())) {
+				continue;
+			}
 
-			OntologyDownloaderThread downloader =
-				new OntologyDownloaderThread(this, nextUrl, importUrls -> {
-					imports.addAll(importUrls);
-				});
+			ontologyIdsAlreadyProcessed.add(ontology.getId());
 
-			Thread t = new Thread(downloader, "Downloader thread " + i);
-			threads.add(t);
+			OntologyDownloaderThread downloaderThread = new OntologyDownloaderThread(
+					this,
+					ontology,
+					importedOntologies -> {
+						synchronized (imports) {
+							imports.addAll(importedOntologies);
+						}
+					},
+					previousChecksums,
+					updatedChecksums,
+					updatedOntologyIds,
+					unchangedOntologyIds
+			);
 
-			t.start();
-		}
 
-		for(Thread t : threads) {
-			try {
-				t.join();
-				System.out.println(t.getName() + " finished");
-			} catch (InterruptedException e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
+			Thread thread = new Thread(downloaderThread, "Downloader thread " + i);
+			threads.add(thread);
+
+			thread.start();
+
+			for (Thread t : threads) {
+				try {
+					t.join();
+					System.out.println(t.getName() + " finished");
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				}
 			}
 		}
 
-		for(String importUrl : imports) {
-			if(!urlsAlreadyProcessed.contains(importUrl)) {
-				urlsAlreadyProcessed.add(importUrl);
-				urlsToDownload.add(importUrl);
+			synchronized (ontologiesToDownload) {
+				for (Ontology importedOntology : imports) {
+					if (!ontologyIdsAlreadyProcessed.contains(importedOntology.getId())) {
+						ontologiesToDownload.add(importedOntology);
+					}
+				}
 			}
+		}
+
+		saveChecksums(updatedChecksums);
+    }
+
+	private void saveChecksums(Map<String, String> checksums) {
+		try (Writer writer = new FileWriter("checksums.json")) {
+			Gson gson = new GsonBuilder().setPrettyPrinting().create();
+			gson.toJson(checksums, writer);
+		} catch (IOException e) {
+			System.err.println("Error writing checksums.json: " + e.getMessage());
 		}
 	}
 
-    }
+	private void printUpdateSummary() {
+		System.out.println("\nUpdate Summary:");
+		System.out.println("Total ontologies processed: " + (updatedOntologyIds.size() + unchangedOntologyIds.size()));
+		System.out.println("Ontologies updated: " + updatedOntologyIds.size());
+		System.out.println("Ontologies unchanged: " + unchangedOntologyIds.size());
+
+		if (!updatedOntologyIds.isEmpty()) {
+			System.out.println("\nUpdated Ontologies:");
+			for (String id : updatedOntologyIds) {
+				System.out.println(" - " + id);
+			}
+		}
+
+		if (!unchangedOntologyIds.isEmpty()) {
+			System.out.println("\nUnchanged Ontologies:");
+			for (String id : unchangedOntologyIds) {
+				System.out.println(" - " + id);
+			}
+		}
+	}
 
 }
