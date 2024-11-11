@@ -101,6 +101,7 @@ public class BulkOntologyDownloader {
 		}
 
 		saveChecksums(updatedChecksums);
+		printUpdateSummary();
     }
 
 	private void saveChecksums(Map<String, String> checksums) {
