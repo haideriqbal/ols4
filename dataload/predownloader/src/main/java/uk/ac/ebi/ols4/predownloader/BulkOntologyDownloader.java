@@ -39,48 +39,60 @@ public class BulkOntologyDownloader {
 		this.unchangedOntologyIds = Collections.synchronizedList(new ArrayList<>());
     }
 
-    public void downloadAll() {
+	public void downloadAll() {
 
 		while (!ontologiesToDownload.isEmpty()) {
 
-		List<Thread> threads = new ArrayList<>();
-		Set<Ontology> imports = new LinkedHashSet<>();
+			List<Thread> threads = new ArrayList<>();
+			List<Ontology> imports = Collections.synchronizedList(new ArrayList<>());
 
-		for(int i = 0; i < NUM_THREADS; ++ i) {
+			int threadsStarted = 0;
 
-			if (ontologiesToDownload.isEmpty()) {
-				break;
-			}
+			while (threadsStarted < NUM_THREADS) {
 
-			Ontology ontology = ontologiesToDownload.remove(0);
+				Ontology ontology = null;
 
-			// Check if we've already processed this ontology ID
-			if (ontologyIdsAlreadyProcessed.contains(ontology.getId())) {
-				continue;
-			}
-
-			ontologyIdsAlreadyProcessed.add(ontology.getId());
-
-			OntologyDownloaderThread downloaderThread = new OntologyDownloaderThread(
-					this,
-					ontology,
-					importedOntologies -> {
-						synchronized (imports) {
-							imports.addAll(importedOntologies);
+				synchronized (ontologiesToDownload) {
+					// Remove and get the next unprocessed ontology
+					while (!ontologiesToDownload.isEmpty()) {
+						Ontology tempOntology = ontologiesToDownload.remove(0);
+						if (!ontologyIdsAlreadyProcessed.contains(tempOntology.getId())) {
+							ontology = tempOntology;
+							ontologyIdsAlreadyProcessed.add(ontology.getId());
+							break;
 						}
-					},
-					previousChecksums,
-					updatedChecksums,
-					updatedOntologyIds,
-					unchangedOntologyIds
-			);
+					}
+				}
 
+				if (ontology == null) {
+					// No more unprocessed ontologies to start in this iteration
+					break;
+				}
 
-			Thread thread = new Thread(downloaderThread, "Downloader thread " + i);
-			threads.add(thread);
+				// Start the thread
+				OntologyDownloaderThread downloaderThread = new OntologyDownloaderThread(
+						this,
+						ontology,
+						importedOntologies -> {
+							synchronized (imports) {
+								imports.addAll(importedOntologies);
+							}
+						},
+						previousChecksums,
+						updatedChecksums,
+						updatedOntologyIds,
+						unchangedOntologyIds
+				);
 
-			thread.start();
+				Thread t = new Thread(downloaderThread, "Downloader thread " + threadsStarted);
+				threads.add(t);
 
+				t.start();
+
+				threadsStarted++;
+			}
+
+			// Wait for all threads to finish
 			for (Thread t : threads) {
 				try {
 					t.join();
@@ -89,8 +101,8 @@ public class BulkOntologyDownloader {
 					e.printStackTrace();
 				}
 			}
-		}
 
+			// Add imports to the list to be processed
 			synchronized (ontologiesToDownload) {
 				for (Ontology importedOntology : imports) {
 					if (!ontologyIdsAlreadyProcessed.contains(importedOntology.getId())) {
@@ -100,9 +112,13 @@ public class BulkOntologyDownloader {
 			}
 		}
 
+		// After all threads complete, save the updated checksums
 		saveChecksums(updatedChecksums);
+
+		// Output the summary of updates
 		printUpdateSummary();
-    }
+	}
+
 
 	private void saveChecksums(Map<String, String> checksums) {
 		try (Writer writer = new FileWriter("checksums.json")) {
