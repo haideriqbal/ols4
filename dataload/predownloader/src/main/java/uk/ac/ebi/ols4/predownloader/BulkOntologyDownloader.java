@@ -22,6 +22,7 @@ public class BulkOntologyDownloader {
 	List<String> unchangedOntologyIds;
 	private Map<String, String> previousChecksums;
 	private Map<String, String> updatedChecksums;
+	private Set<String> mainOntologyIds;
 
     Set<OntologyDownloaderThread> threads = new HashSet<>();
 
@@ -37,6 +38,10 @@ public class BulkOntologyDownloader {
 		this.updatedChecksums = new ConcurrentHashMap<>();
 		this.updatedOntologyIds = Collections.synchronizedList(new ArrayList<>());
 		this.unchangedOntologyIds = Collections.synchronizedList(new ArrayList<>());
+		this.mainOntologyIds = new HashSet<>();
+		for (Ontology ontology : ontologies) {
+			mainOntologyIds.add(ontology.getId());
+		}
     }
 
 	public void downloadAll() {
@@ -148,6 +153,11 @@ public class BulkOntologyDownloader {
 				System.out.println(" - " + id);
 			}
 		}
+	}
+
+	// Provide a method to check if an ontology ID is a main ontology
+	public boolean isMainOntology(String ontologyId) {
+		return mainOntologyIds.contains(ontologyId);
 	}
 
 }

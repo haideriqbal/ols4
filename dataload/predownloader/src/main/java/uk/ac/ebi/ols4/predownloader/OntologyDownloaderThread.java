@@ -86,6 +86,9 @@ public class OntologyDownloaderThread implements Runnable {
 
             String previousChecksum = previousChecksums.get(ontologyUrl);
 
+            // Update the checksum map (synchronized for thread safety)
+            updatedChecksums.put(ontologyUrl, newChecksum);
+
             if (previousChecksum == null || !newChecksum.equals(previousChecksum)) {
                 // Ontology is new or has changed; process it
                 System.out.println("Processing updated ontology: " + ontologyUrl);
@@ -93,10 +96,10 @@ public class OntologyDownloaderThread implements Runnable {
                 // Parse ontology for imports
                 Set<Ontology> importOntologies = parseOntologyForImports(path, mimetype);
 
-                // Update the checksum map (synchronized for thread safety)
-                updatedChecksums.put(ontologyUrl, newChecksum);
-
-                updatedOntologyIds.add(ontologyId);
+                // Record that this ontology was updated if it's a main ontology
+                if (downloader.isMainOntology(ontologyId)) {
+                    updatedOntologyIds.add(ontologyId);
+                }
 
                 // Pass import URLs to the parent downloader
                 consumeImports.accept(importOntologies);
@@ -104,7 +107,10 @@ public class OntologyDownloaderThread implements Runnable {
             } else {
                 // Ontology hasn't changed; skip processing
                 System.out.println("Skipping unchanged ontology: " + ontologyUrl);
-                unchangedOntologyIds.add(ontologyId);
+                // Record that this ontology was unchanged if it's a main ontology
+                if (downloader.isMainOntology(ontologyId)) {
+                    unchangedOntologyIds.add(ontologyId);
+                }
             }
 
         } catch (Exception e) {
