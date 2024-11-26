@@ -14,11 +14,9 @@ import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -43,27 +41,40 @@ import org.apache.jena.sparql.core.Quad;
 public class OntologyDownloaderThread implements Runnable {
 
     BulkOntologyDownloader downloader;
-    String ontologyUrl;
-    Consumer<Collection<String>> consumeImports;
+    Ontology ontology;
+    Consumer<Collection<Ontology>> consumeImports;
+    Map<String, String> previousChecksums;
+    Map<String, String> updatedChecksums;
+    List<String> updatedOntologyIds;
+    List<String> unchangedOntologyIds;
 
-    public OntologyDownloaderThread(BulkOntologyDownloader downloader, String ontologyUrl, Consumer<Collection<String>> consumeImports) {
+    public OntologyDownloaderThread(BulkOntologyDownloader downloader,
+                                    Ontology ontology,
+                                    Consumer<Collection<Ontology>> consumeImports,
+                                    Map<String, String> previousChecksums,
+                                    Map<String, String> updatedChecksums,
+                                    List<String> updatedOntologyIds,
+                                    List<String> unchangedOntologyIds) {
 
         super();
 
         this.downloader = downloader;
-        this.ontologyUrl = ontologyUrl;
+        this.ontology = ontology;
         this.consumeImports = consumeImports;
+        this.previousChecksums = previousChecksums;
+        this.updatedChecksums = updatedChecksums;
+        this.updatedOntologyIds = updatedOntologyIds;
+        this.unchangedOntologyIds = unchangedOntologyIds;
     }
 
 
     @Override
     public void run() {
-
+        String ontologyId = ontology.getId();
+        String ontologyUrl = ontology.getUrl();
         String path = downloader.downloadPath + "/" + urlToFilename(ontologyUrl);
 
         System.out.println(Thread.currentThread().getName() + " Starting download for " + ontologyUrl + " to " + path);
-
-        Set<String> importUrls = new LinkedHashSet<>();
 
         long begin = System.nanoTime();
 
@@ -71,36 +82,44 @@ public class OntologyDownloaderThread implements Runnable {
 
             String mimetype = downloadURL(ontologyUrl, path);
 
-            Lang lang = RDFLanguages.contentTypeToLang(mimetype);
-            if(lang == null) {
-                lang = Lang.RDFXML;
+            String newChecksum = computeMD5Checksum(new File(path));
+
+            String previousChecksum = previousChecksums.get(ontologyUrl);
+
+            // Update the checksum map (synchronized for thread safety)
+            updatedChecksums.put(ontologyUrl, newChecksum);
+
+            if (previousChecksum == null || !newChecksum.equals(previousChecksum)) {
+                // Ontology is new or has changed; process it
+                System.out.println("Processing updated ontology: " + ontologyUrl);
+
+                // Parse ontology for imports
+                Set<Ontology> importOntologies = parseOntologyForImports(path, mimetype);
+
+                // Record that this ontology was updated if it's a main ontology
+                if (downloader.isMainOntology(ontologyId)) {
+                    updatedOntologyIds.add(ontologyId);
+                }
+
+                // Pass import URLs to the parent downloader
+                consumeImports.accept(importOntologies);
+
+            } else {
+                // Ontology hasn't changed; skip processing
+                System.out.println("Skipping unchanged ontology: " + ontologyUrl);
+                // Record that this ontology was unchanged if it's a main ontology
+                if (downloader.isMainOntology(ontologyId)) {
+                    unchangedOntologyIds.add(ontologyId);
+                }
             }
 
-            // parse to look for imports only
-            createParser(lang).source(new FileInputStream(path)).parse(new StreamRDF() {
-                public void start() {}
-                public void quad(Quad quad) {}
-                public void base(String base) {}
-                public void prefix(String prefix, String iri) {}
-                public void finish() {}
-                public void triple(Triple triple) {
-
-                    if (triple.getPredicate().getURI().equals("http://www.w3.org/2002/07/owl#imports")) {
-                        importUrls.add(triple.getObject().getURI());
-                    }
-                }
-            });
-
         } catch (Exception e) {
-
             e.printStackTrace();
         }
 
         long end = System.nanoTime();
 
         System.out.println(Thread.currentThread().getName() + " Downloading and parsing for imports " + ontologyUrl + " took " + ((end-begin) / 1000 / 1000 / 1000) + "s");
-
-        consumeImports.accept(importUrls);
     }
 
     private String urlToFilename(String url) {
@@ -136,6 +155,52 @@ public class OntologyDownloaderThread implements Runnable {
         } else {
             return "";
         }
+    }
+
+    private String computeMD5Checksum(File file) throws NoSuchAlgorithmException {
+        try (InputStream fis = new FileInputStream(file)) {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                md.update(buffer, 0, bytesRead);
+            }
+            byte[] digest = md.digest();
+            // Convert the byte array to a hexadecimal string
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b & 0xff));
+            }
+            return sb.toString();
+        } catch (IOException | NoSuchAlgorithmException e) {
+            System.err.println("Error computing checksum for file " + file.getName() + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private Set<Ontology> parseOntologyForImports(String path, String mimetype) throws FileNotFoundException {
+        Set<Ontology> importOntologies = new LinkedHashSet<>();
+
+        Lang lang = RDFLanguages.contentTypeToLang(mimetype);
+        if (lang == null) {
+            lang = Lang.RDFXML;
+        }
+
+        createParser(lang).source(new FileInputStream(path)).parse(new StreamRDF() {
+            public void start() {}
+            public void quad(Quad quad) {}
+            public void base(String base) {}
+            public void prefix(String prefix, String iri) {}
+            public void finish() {}
+            public void triple(Triple triple) {
+                if (triple.getPredicate().getURI().equals("http://www.w3.org/2002/07/owl#imports")) {
+                    String importUrl = triple.getObject().getURI();
+                    importOntologies.add(new Ontology(importUrl, importUrl));
+                }
+            }
+        });
+
+        return importOntologies;
     }
 
 
