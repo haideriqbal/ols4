@@ -47,6 +47,7 @@ public class OntologyDownloaderThread implements Runnable {
     Map<String, String> updatedChecksums;
     List<String> updatedOntologyIds;
     List<String> unchangedOntologyIds;
+    Set<String> processedUrls = new HashSet<>();
 
     public OntologyDownloaderThread(BulkOntologyDownloader downloader,
                                     Ontology ontology,
@@ -79,21 +80,17 @@ public class OntologyDownloaderThread implements Runnable {
         long begin = System.nanoTime();
 
         try {
+            // Clear processed URLs for this run
+            processedUrls.clear();
 
-            String mimetype = downloadURL(ontologyUrl, path);
+            // Check ontology and all its imports
+            boolean isChanged = isOntologyOrImportsChanged(ontologyUrl, path);
 
-            String newChecksum = computeMD5Checksum(new File(path));
+            if (isChanged) {
+                System.out.println("Processing updated ontology (or its imports changed): " + ontologyUrl);
 
-            String previousChecksum = previousChecksums.get(ontologyUrl);
-
-            // Update the checksum map (synchronized for thread safety)
-            updatedChecksums.put(ontologyUrl, newChecksum);
-
-            if (previousChecksum == null || !newChecksum.equals(previousChecksum)) {
-                // Ontology is new or has changed; process it
-                System.out.println("Processing updated ontology: " + ontologyUrl);
-
-                // Parse ontology for imports
+                // Parse ontology for imports to ensure all are downloaded
+                String mimetype = Files.readString(Paths.get(path + ".mimetype"));
                 Set<Ontology> importOntologies = parseOntologyForImports(path, mimetype);
 
                 // Record that this ontology was updated if it's a main ontology
@@ -103,11 +100,8 @@ public class OntologyDownloaderThread implements Runnable {
 
                 // Pass import URLs to the parent downloader
                 consumeImports.accept(importOntologies);
-
             } else {
-                // Ontology hasn't changed; skip processing
-                System.out.println("Skipping unchanged ontology: " + ontologyUrl);
-                // Record that this ontology was unchanged if it's a main ontology
+                System.out.println("Skipping unchanged ontology (and all imports unchanged): " + ontologyUrl);
                 if (downloader.isMainOntology(ontologyId)) {
                     unchangedOntologyIds.add(ontologyId);
                 }
@@ -118,8 +112,8 @@ public class OntologyDownloaderThread implements Runnable {
         }
 
         long end = System.nanoTime();
-
-        System.out.println(Thread.currentThread().getName() + " Downloading and parsing for imports " + ontologyUrl + " took " + ((end-begin) / 1000 / 1000 / 1000) + "s");
+        System.out.println(Thread.currentThread().getName() + " Processing " + ontologyUrl +
+                " took " + ((end-begin) / 1000 / 1000 / 1000) + "s");
     }
 
     private String urlToFilename(String url) {
@@ -201,6 +195,44 @@ public class OntologyDownloaderThread implements Runnable {
         });
 
         return importOntologies;
+    }
+
+    private boolean isOntologyOrImportsChanged(String ontologyUrl, String path) throws Exception {
+        // Already processed this URL in this recursive chain
+        if (!processedUrls.add(ontologyUrl)) {
+            return false;
+        }
+
+        // Download and get checksum
+        String mimetype = downloadURL(ontologyUrl, path);
+        String newChecksum = computeMD5Checksum(new File(path));
+        String previousChecksum = previousChecksums.get(ontologyUrl);
+
+        // Update the checksum map
+        updatedChecksums.put(ontologyUrl, newChecksum);
+
+        // Check if this ontology changed
+        boolean isChanged = previousChecksum == null || !newChecksum.equals(previousChecksum);
+
+        // Parse imports and check them recursively
+        Set<Ontology> importOntologies = parseOntologyForImports(path, mimetype);
+
+        for (Ontology importedOntology : importOntologies) {
+            String importUrl = importedOntology.getUrl();
+            String importPath = downloader.downloadPath + "/" + urlToFilename(importUrl);
+
+            try {
+                // Recursively check if import changed
+                if (isOntologyOrImportsChanged(importUrl, importPath)) {
+                    isChanged = true;
+                }
+            } catch (Exception e) {
+                System.err.println("Error processing import " + importUrl + ": " + e.getMessage());
+                // Skip this import as per requirement
+            }
+        }
+
+        return isChanged;
     }
 
 
