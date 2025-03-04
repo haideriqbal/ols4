@@ -1,5 +1,6 @@
 package uk.ac.ebi.ols4.predownloader;
 
+import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
@@ -8,16 +9,9 @@ import com.google.gson.stream.JsonWriter;
 import org.apache.commons.cli.*;
 
 import java.io.*;
+import java.lang.reflect.Type;
 import java.net.URL;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class Downloader {
@@ -83,6 +77,18 @@ public class Downloader {
 
         }).collect(Collectors.toList());
 
+        Map<String, String> previousChecksums = new HashMap<>();
+        File checksumFile = new File("checksums.json");
+        if (checksumFile.exists()) {
+            try (Reader reader = new FileReader(checksumFile)) {
+                Type type = new TypeToken<Map<String, String>>() {}.getType();
+                previousChecksums = gson.fromJson(reader, type);
+            } catch (IOException e) {
+                System.err.println("Error reading checksums.json: " + e.getMessage());
+            }
+        }
+
+
 
         LinkedHashMap<String, Map<String,Object>> mergedConfigs = new LinkedHashMap<>();
 
@@ -108,9 +114,11 @@ public class Downloader {
 
 
         Set<String> ontologyUrls = new LinkedHashSet<>();
+        List<Ontology> ontologyList = new ArrayList<>();
 
         for(Map<String,Object> config : mergedConfigs.values()) {
 
+            String ontologyId = ((String) config.get("id")).toLowerCase();
             String url = (String) config.get("ontology_purl");
 
             if(url == null) {
@@ -132,12 +140,13 @@ public class Downloader {
                 }
             }
 
-            if(url != null)
-                ontologyUrls.add(url);
+            if (url != null) {
+                ontologyList.add(new Ontology(ontologyId, url));
+            }
         }
 
             
-        BulkOntologyDownloader downloader = new BulkOntologyDownloader(List.copyOf(ontologyUrls), downloadPath, bLoadLocalFiles);
+        BulkOntologyDownloader downloader = new BulkOntologyDownloader(ontologyList, downloadPath, bLoadLocalFiles, previousChecksums);
 
         downloader.downloadAll();
 
