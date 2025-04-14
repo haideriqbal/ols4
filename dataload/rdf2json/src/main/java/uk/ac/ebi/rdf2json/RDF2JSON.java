@@ -143,11 +143,17 @@ public class RDF2JSON {
             logger.info("--- Loading ontology: {}", ontologyId);
 
             try {
-
+                // Attempt to process the ontology normally
                 OntologyGraph graph = new OntologyGraph(ontoConfig, bLoadLocalFiles, bNoDates, downloadedPath);
 
                 if(graph.ontologyNode == null) {
                     logger.error("No Ontology node found; nothing will be written");
+                    
+                    // If we have a mergeOutputWith file, we'll handle the fallback in the merge section
+                    if (mergeOutputWith == null) {
+                        logger.info("No previous build available for fallback for: {}", ontologyId);
+                    }
+                    
                     continue;
                 }
 
@@ -160,16 +166,25 @@ public class RDF2JSON {
                 loadedOntologyIds.add(ontologyId);
 
             } catch(Throwable t) {
+                 logger.error("Error processing ontology {}: {}", ontologyId, t.getMessage());
                  t.printStackTrace();
+                 
+                 // If we have a mergeOutputWith file, we'll handle the fallback in the merge section
+                 if (mergeOutputWith == null) {
+                     logger.info("No previous build available for fallback for: {}", ontologyId);
+                 } else {
+                     logger.info("Will attempt to use previous build as fallback for: {}", ontologyId);
+                 }
             }
         }
 
         if(mergeOutputWith != null) {
 
-            // Need to look for any ontologies that we didn't load but were loaded last time, and
-            // keep the old versions of them from the previous JSON file.
-
-            logger.info("Adding previously loaded ontologies from {} (--mergeOutputWith)", mergeOutputWith);
+            // The mergeOutputWith functionality has now dual purpose:
+            // 1. Keep ontologies that weren't processed in this run but were in previous runs
+            // 2. Use previous builds as fallbacks for ontologies that failed to process in this run
+            
+            logger.info("Adding previously loaded ontologies and fallbacks from {} (--mergeOutputWith)", mergeOutputWith);
             long startTime = System.nanoTime();
 
             JsonReader scanReader = new JsonReader(new InputStreamReader(new FileInputStream(mergeOutputWith)));
@@ -200,14 +215,33 @@ public class RDF2JSON {
 
                         String ontologyId = scanReader.nextString().toLowerCase();
 
+                        // There are two cases where we want to use the previous ontology data:
+                        // 1. We didn't process this ontology at all in the current run
+                        // 2. We tried to process this ontology but it failed (not in loadedOntologyIds)
                         if(!loadedOntologyIds.contains(ontologyId)) {
-
-                            logger.info("Keeping output for ontology {} from previous run (--mergeOutputWith)",
-                                    ontologyId);
+                            // Check if this was actually a failed ontology in the current run
+                            boolean wasInConfig = mergedConfigs.containsKey(ontologyId);
+                            
+                            if (wasInConfig) {
+                                logger.info("Using previous build as fallback for failed ontology: {}", ontologyId);
+                            } else {
+                                logger.info("Keeping output for ontology {} from previous run (--mergeOutputWith)", ontologyId);
+                            }
 
                             Map<String,Object> ontology = gson.fromJson(actualReader, Map.class);
+                            
+                            // If this is a fallback for a failed ontology, add a note about it
+                            if (wasInConfig) {
+                                // Add a metadata flag to indicate this is a fallback from previous build
+                                if (ontology.containsKey("config")) {
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Object> config = (Map<String, Object>) ontology.get("config");
+                                    config.put("is_fallback_build", true);
+                                    config.put("fallback_reason", "Processing failed in current build");
+                                }
+                            }
+                            
                             writeGenericValue(writer, ontology);
-
                         } else {
                             actualReader.skipValue();
                         }
